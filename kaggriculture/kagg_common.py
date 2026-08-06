@@ -312,19 +312,6 @@ def decode_unit_action(idx):
 # current obs so the policy doesn't have to output exact quantities.
 # ------------------------------------------------------------------------
 _SEED_BUY_QTY = {"WHEAT": 5, "CARROT": 5, "TOMATO": 2, "STRAWBERRY": 2, "MELON": 1}
-ANIMAL_PRICES = {"GOOSE": 300, "COW": 400, "SHEEP": 500}
-LAND_ORDER = ["NE", "SW", "SE"]
-LAND_PRICES = {"NE": 1000, "SW": 2000, "SE": 4000}
-_BUY_PRODUCT_QTY = {"WHEAT": 10, "FERTILIZER": 5}
-
-
-def _fib_hire_cost(n_hires_today):
-    """Cost of the *next* hire given how many hires already happened today
-    (matches the game's `farmHandCostMult * fib(n)` rule, default mult=1)."""
-    a, b = 1, 1
-    for _ in range(max(0, n_hires_today)):
-        a, b = b, a + b
-    return a
 
 
 def _market_noop(obs, player):
@@ -567,49 +554,11 @@ def get_action_mask(obs, player, max_hands=MAX_HANDS, market_slots=MARKET_SLOTS)
     # Market actions
     market_mask = np.ones(N_MARKET_ACTIONS, dtype=np.bool_)
 
-    # Cost-aware affordability gating. The old version only checked a flat
-    # `money < 10.0` for EVERY buy-type action, which does nothing to stop
-    # an early, still-mostly-random policy from firing several $300-4000
-    # purchases (BUY_ANIMAL, BUY_LAND, escalating HIRE cost) in the same
-    # turn -- each individually "affordable" at $3000 starting cash, but
-    # collectively capable of burning the whole stake in a handful of turns
-    # before anything productive exists to earn it back. Gate each action
-    # on its own real cost instead.
-    market = _g(obs, "market", {}) or {}
-    m_price = _g(market, "prices", {}) or {}
-
-    # BUY_SEED x5 (indices 1-5)
-    for i, crop in enumerate(CROPS):
-        cost = SEED_PRICES.get(crop, 10) * _SEED_BUY_QTY[crop]
-        if money < cost:
-            market_mask[1 + i] = False
-
-    # BUY_ANIMAL x3 (indices 6-8)
-    for i, animal in enumerate(ANIMALS):
-        if money < ANIMAL_PRICES[animal]:
-            market_mask[6 + i] = False
-
-    # BUY_PRODUCT x2 (indices 9-10): WHEAT qty 10, FERTILIZER qty 5 -- priced
-    # off the live market price (BUY_PRODUCT is subject to the same dynamic
-    # pricing as SELL) rather than a fixed guess.
-    wheat_cost = _g(m_price, "WHEAT", 25) * _BUY_PRODUCT_QTY["WHEAT"]
-    fert_cost = _g(m_price, "FERTILIZER", 20) * _BUY_PRODUCT_QTY["FERTILIZER"]
-    if money < wheat_cost:
-        market_mask[9] = False
-    if money < fert_cost:
-        market_mask[10] = False
-
-    # HIRE (index 20): real next-hire cost, not a flat $10.
-    hires_today = _g(me, "hires_today", 0)
-    if money < _fib_hire_cost(hires_today):
-        market_mask[20] = False
-
-    # BUY_LAND (index 21): real cost of the *next* quadrant, and disabled
-    # entirely once all quadrants are already owned.
-    unlocked = _g(me, "unlocked_quadrants", ["NW"]) or ["NW"]
-    next_quad = next((q for q in LAND_ORDER if q not in unlocked), None)
-    if next_quad is None or money < LAND_PRICES[next_quad]:
-        market_mask[21] = False
+    # Prevent buying actions if out of money (cost floor is ~10)
+    if money < 500.0:
+        market_mask[1:11] = False  # Disable BUY_SEED(1-5), BUY_ANIMAL(6-8), BUY_PRODUCT(9-10)
+        market_mask[20] = False    # Disable HIRE
+        market_mask[21] = False    # Disable BUY_LAND
 
     # Prevent SELL actions if the shed has 0 of that item
     # SELL_ALL for PRODUCTS starts at index 11

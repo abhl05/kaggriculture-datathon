@@ -36,17 +36,6 @@ from kaggle_environments import make as kaggle_make
 
 import kagg_common as kc
 
-# Added to (or subtracted from) the final step's reward on a win (or loss).
-# Sized to be clearly larger than a typical single-step dense-reward tick
-# (episode_reward means observed so far are O(-25) accumulated over 719
-# steps, i.e. individual ticks are tiny) so the terminal outcome isn't
-# drowned out by shaping noise, without being so large it swamps the
-# per-step signal entirely and turns this back into a near-sparse-reward
-# problem. Tune alongside LIQUIDATION_TAPER_DAYS in kagg_common.py -- they
-# work together to pull the policy toward "actually finish with cash in
-# the bank" rather than "look good on my personal net-worth metric".
-TERMINAL_WIN_BONUS = 20.0
-
 
 # ==============================================================================
 # 1. Gymnasium wrapper around the Kaggriculture kaggle_environments trainer
@@ -85,7 +74,6 @@ class KaggricultureEnv(gym.Env):
 
     def _new_trainer(self):
         opp = self.opponents[self._rng.integers(0, len(self.opponents))]
-        self._current_opponent = opp
         self._kaggle_env = kaggle_make(
             "kaggriculture", configuration={"episodeSteps": self.episode_steps}, debug=False
         )
@@ -120,20 +108,7 @@ class KaggricultureEnv(gym.Env):
 
         info = dict(info) if info else {}
         if terminated or truncated:
-            outcome = kc.episode_outcome_info(raw_obs, self.player)
-            outcome["opponent"] = self._current_opponent
-            info.update(outcome)
-            # The dense net-worth shaping reward is a proxy; ground the
-            # policy in the actual thing the competition scores (final bank
-            # cash vs. opponent) with an explicit terminal bonus. Without
-            # this, nothing in the reward signal ever directly reflects
-            # "did I win the game" -- see kagg_common.py's module docstring
-            # note on this fix for the full reasoning.
-            if outcome["win"] == 1.0:
-                reward += TERMINAL_WIN_BONUS
-            elif outcome["win"] == 0.0:
-                reward -= TERMINAL_WIN_BONUS
-            # tie (win == 0.5): no bonus either way
+            info.update(kc.episode_outcome_info(raw_obs, self.player))
 
         obs_vec = kc.encode_observation(raw_obs, self.player)
         return obs_vec, reward, terminated, truncated, info
@@ -178,13 +153,6 @@ class VerboseTrainingCallback(BaseCallback):
         self.win_buf = deque(maxlen=window)
         self.ep_reward_buf = deque(maxlen=window)
         self.ep_len_buf = deque(maxlen=window)
-        # Per-opponent breakdown -- a pooled win-rate/money average across a
-        # mixed opponent pool (e.g. ["random", "starter"]) can swing a lot
-        # purely from which opponent got sampled more in a given window,
-        # independent of any real change in policy quality. Splitting these
-        # out makes that visible instead of looking like a regression.
-        self.per_opp_money = {}
-        self.per_opp_win = {}
         self._last_time = None
         self._last_steps = 0
 
@@ -194,9 +162,6 @@ class VerboseTrainingCallback(BaseCallback):
                 self.money_buf.append(info["final_money"])
                 self.opp_money_buf.append(info["opp_final_money"])
                 self.win_buf.append(info["win"])
-                opp_name = info.get("opponent", "unknown")
-                self.per_opp_money.setdefault(opp_name, deque(maxlen=self.window)).append(info["final_money"])
-                self.per_opp_win.setdefault(opp_name, deque(maxlen=self.window)).append(info["win"])
             if "episode" in info:
                 self.ep_reward_buf.append(info["episode"]["r"])
                 self.ep_len_buf.append(info["episode"]["l"])
@@ -231,11 +196,6 @@ class VerboseTrainingCallback(BaseCallback):
         print(f"  episode_length   : mean={l_mean:9.1f}")
         print(f"  final_bank($)    : mean={money_mean:9.1f}  std={money_std:8.1f}  vs opp mean={opp_money_mean:9.1f}")
         print(f"  win_rate         : {win_rate:6.3f}  (n={len(self.win_buf)}, over last {self.window} episodes)")
-        for opp_name in sorted(self.per_opp_money):
-            m_buf = self.per_opp_money[opp_name]
-            w_buf = self.per_opp_win[opp_name]
-            print(f"    vs {opp_name:10s}: n={len(m_buf):4d}  "
-                  f"my_bank_mean=${np.mean(m_buf):9.1f}  win_rate={np.mean(w_buf):5.3f}")
         if len(self.model.ep_info_buffer):
             print(f"  sb3 ep_info_buf  : mean_reward={np.mean([e['r'] for e in self.model.ep_info_buffer]):9.2f}")
         print(f"  policy loss      : {self.model.logger.name_to_value.get('train/policy_gradient_loss', float('nan')):.5f}")
